@@ -46,7 +46,7 @@ for (const [i, m] of MOVIES.entries()) {
   } catch (e) { console.warn('poster lookup failed for', m.title, e.message); }
   if (m.pick) info.year = '';
   const created = await client.create({
-    title: m.title, ...info, addedBy: 'maksim',
+    title: m.title, ...info, addedBy: 'alina',
     // keep the original list order: item 1 is the newest
     addedAt: new Date(start - i * 60000).toISOString(),
   });
