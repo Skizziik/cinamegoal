@@ -1,0 +1,14 @@
+{
+  "name": "cinemagoal",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "serve": "node tests/serve.js",
+    "test": "node --test tests/unit/*.test.js",
+    "test:e2e": "playwright test",
+    "test:all": "node --test tests/unit/*.test.js && playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.1"
+  }
+}

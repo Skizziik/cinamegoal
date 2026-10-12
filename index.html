@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Наше кино</title>
+  <meta name="description" content="Наш список фильмов: что посмотреть, что уже посмотрели и как оценили.">
+  <meta name="theme-color" content="#000000">
+  <meta name="color-scheme" content="dark">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Наше кино">
+  <meta name="format-detection" content="telephone=no">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="nav" id="nav">
+    <div class="nav-bar">
+      <div class="nav-compact-title" aria-hidden="true">Наше кино</div>
+      <div class="sync" id="sync" data-state="loading" title="Синхронизация">
+        <span class="sync-dot"></span><span class="sync-text">Загрузка…</span>
+      </div>
+      <button class="me-btn" id="meBtn" type="button" aria-label="Сменить пользователя"></button>
+    </div>
+  </header>
+
+  <main class="page">
+    <section class="hero">
+      <h1 class="large-title">Наше кино</h1>
+      <p class="hero-sub" id="stats">&nbsp;</p>
+    </section>
+
+    <div class="banner" id="banner" hidden></div>
+
+    <div class="controls">
+      <label class="search">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 3a7.5 7.5 0 0 1 5.96 12.05l4.25 4.24a1 1 0 0 1-1.42 1.42l-4.24-4.25A7.5 7.5 0 1 1 10.5 3Zm0 2a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11Z"/></svg>
+        <input id="search" type="search" placeholder="Поиск" autocomplete="off" enterkeyhint="search">
+      </label>
+      <div class="segmented" id="tabs" role="tablist">
+        <button type="button" role="tab" data-tab="towatch" aria-selected="true">Хотим <span class="count" data-count="towatch"></span></button>
+        <button type="button" role="tab" data-tab="watched" aria-selected="false">Посмотрели <span class="count" data-count="watched"></span></button>
+      </div>
+      <div class="chips" id="filters">
+        <button type="button" class="chip" data-filter="all" aria-pressed="true">Все</button>
+        <button type="button" class="chip" data-filter="maksim" aria-pressed="false"><i class="dot maksim"></i>Максим</button>
+        <button type="button" class="chip" data-filter="alina" aria-pressed="false"><i class="dot alina"></i>Алина</button>
+        <select class="chip sort" id="sort" aria-label="Сортировка">
+          <option value="new">Сначала новые</option>
+          <option value="old">Сначала старые</option>
+          <option value="rating">По оценке</option>
+          <option value="az">По алфавиту</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="grid" id="grid" aria-live="polite"></div>
+    <div class="empty" id="empty" hidden></div>
+  </main>
+
+  <button class="fab" id="addBtn" type="button">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a1 1 0 0 1 1 1v6h6a1 1 0 1 1 0 2h-6v6a1 1 0 1 1-2 0v-6H5a1 1 0 1 1 0-2h6V5a1 1 0 0 1 1-1Z"/></svg>
+    <span>Добавить фильм</span>
+  </button>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+
+  <!-- Sheets are rendered by app.js -->
+  <div class="sheet-root" id="sheetRoot"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
