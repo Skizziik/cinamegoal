@@ -4,7 +4,8 @@
 import { createHash } from 'node:crypto';
 
 export class FakeGitHub {
-  constructor({ owner = 'Skizziik', repo = 'cinamegoal', token = 'test-token' } = {}) {
+  constructor({ owner = 'Skizziik', repo = 'cinamegoal', token = 'test-token', readOnlyToken = 'read-only-token' } = {}) {
+    this.readOnlyToken = readOnlyToken;
     this.prefix = `/repos/${owner}/${repo}`;
     this.token = token;
     this.issues = [];
@@ -34,7 +35,9 @@ export class FakeGitHub {
     this.requests.push({ method, path: u.pathname + u.search });
     const auth = h.authorization;
     const authed = auth === `Bearer ${this.token}`;
-    if (auth && !authed) return this.json(401, { message: 'Bad credentials' });
+    const readOnly = auth === `Bearer ${this.readOnlyToken}`;
+    if (auth && !authed && !readOnly) return this.json(401, { message: 'Bad credentials' });
+    if (readOnly && method !== 'GET') return this.json(403, { message: 'Resource not accessible by personal access token' });
     if (!u.pathname.startsWith(`${this.prefix}/issues`)) return this.json(404, { message: 'Not Found' });
     const rest = u.pathname.slice(this.prefix.length);
 

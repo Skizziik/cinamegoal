@@ -95,6 +95,7 @@ function setSync(kind, text) {
   const el = $('#sync');
   const labels = { ok: 'Синхронизировано', saving: 'Сохранение…', loading: 'Загрузка…', error: 'Нет связи', readonly: 'Только просмотр' };
   if (kind === 'ok' && readOnly()) kind = 'readonly';
+  if (kind === 'ok' && state.writeDenied) { kind = 'error'; text = 'Нет права на запись'; }
   if (kind === 'ok' && state.pending.size) kind = 'saving';
   el.dataset.state = kind;
   $('.sync-text', el).textContent = text || labels[kind];
@@ -132,6 +133,18 @@ function applyServerList(list) {
   updateOpenSheet();
 }
 
+const isRateLimit = (e) => e?.status === 429 || /rate limit/i.test(e?.message || '');
+const noWriteAccess = (e) => (e?.status === 403 || e?.status === 404) && !isRateLimit(e);
+
+// Human-readable reason for a failed write, shown in a toast.
+function errorText(e, action) {
+  if (!e?.status) return `${action}: нет связи с GitHub — проверь интернет`;
+  if (e.status === 401) return `${action}: ключ доступа недействителен`;
+  if (isRateLimit(e)) return `${action}: GitHub ограничил запросы, попробуй через минуту`;
+  if (noWriteAccess(e)) return `${action}: у ключа нет права на запись. В настройках токена нужно Issues → «Read and write»`;
+  return `${action}: ошибка GitHub ${e.status} (${e.message})`;
+}
+
 function handleError(e) {
   console.warn(e);
   if (e?.status === 401 && state.token) {
@@ -143,8 +156,11 @@ function handleError(e) {
     refresh({ force: true });
     return;
   }
-  if (e?.status === 403 || e?.status === 429) {
+  if (isRateLimit(e)) {
     setSync('error', 'Лимит запросов, подожди');
+  } else if (noWriteAccess(e)) {
+    state.writeDenied = true;
+    setSync('error', 'Нет права на запись');
   } else {
     setSync('error');
   }
@@ -187,6 +203,7 @@ async function addMovie(fields) {
   render();
   try {
     const created = await enqueue(tmpId, () => client.create(fields));
+    state.writeDenied = false;
     state.movies.delete(tmpId);
     state.movies.set(created.id, created);
     saveCache();
@@ -196,7 +213,7 @@ async function addMovie(fields) {
     state.movies.delete(tmpId);
     render();
     handleError(e);
-    toast('Не удалось добавить фильм');
+    toast(errorText(e, 'Не удалось добавить'), null, null, 8000);
     return null;
   }
 }
@@ -209,6 +226,7 @@ async function patchMovie(id, patch) {
   updateOpenSheet();
   try {
     const fresh = await enqueue(id, () => client.update(id, patch));
+    state.writeDenied = false;
     if (!state.pending.get(id)) {
       state.movies.set(id, fresh);
       saveCache();
@@ -218,7 +236,7 @@ async function patchMovie(id, patch) {
     return true;
   } catch (e) {
     handleError(e);
-    toast('Не удалось сохранить — проверь интернет');
+    toast(errorText(e, 'Не сохранилось'), null, null, 8000);
     await refresh({ force: true });
     return false;
   }
@@ -236,7 +254,7 @@ async function deleteMovie(id) {
     state.movies.set(id, { ...m, deleted: false });
     render();
     handleError(e);
-    toast('Не удалось удалить');
+    toast(errorText(e, 'Не удалось удалить'), null, null, 8000);
   }
 }
 
@@ -367,13 +385,13 @@ function renderBanner() {
 
 /* ---------------- toast ---------------- */
 let toastTimer = null;
-function toast(text, actionLabel, action) {
+function toast(text, actionLabel, action, ms) {
   const t = $('#toast');
   t.innerHTML = `<span>${esc(text)}</span>${actionLabel ? `<button type="button">${esc(actionLabel)}</button>` : ''}`;
   t.hidden = false;
   if (actionLabel) $('button', t).onclick = () => { t.hidden = true; action(); };
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { t.hidden = true; }, actionLabel ? 6000 : 3000);
+  toastTimer = setTimeout(() => { t.hidden = true; }, ms || (actionLabel ? 6000 : 3000));
 }
 
 /* ---------------- sheets ---------------- */

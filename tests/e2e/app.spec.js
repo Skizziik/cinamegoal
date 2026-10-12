@@ -253,3 +253,16 @@ test('form inputs are at least 16px so iOS does not zoom', async ({ browser }) =
   const sizes = await page.locator('input, textarea').evaluateAll((els) => els.map((e) => parseFloat(getComputedStyle(e).fontSize)));
   expect(Math.min(...sizes)).toBeGreaterThanOrEqual(16);
 });
+
+test('a key without write access explains the problem instead of failing silently', async ({ browser }) => {
+  const gh = makeServer();
+  gh.addMovie({ title: 'Сплит', addedBy: 'alina' });
+  const { page } = await openApp(browser, gh, { token: gh.readOnlyToken });
+  await card(page, 'Сплит').click();
+  await page.getByRole('button', { name: 'Посмотрели!' }).click();
+  await expect(page.locator('#toast')).toContainText('нет права на запись');
+  await expect(page.locator('#toast')).toContainText('Read and write');
+  await expect(page.locator('#sync')).toHaveAttribute('data-state', 'error');
+  await expect(page.getByRole('button', { name: 'Посмотрели!' })).toBeVisible(); // reverted to server state
+  expect(gh.movie(1).watched).toBe(false);
+});

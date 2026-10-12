@@ -108,6 +108,13 @@ img { display: block; max-width: 100%; }
 }
 .avatar.maksim { background: linear-gradient(135deg, #64d2ff, var(--maksim)); }
 .avatar.alina { background: linear-gradient(135deg, #ff9fb2, var(--alina)); }
+/* Profile photos replace the letter wherever a person is shown. */
+.avatar.alina, .badge.who.alina {
+  background: url("icons/avatar-alina.jpg") center / cover, var(--alina);
+  color: transparent;
+  box-shadow: 0 0 0 1.5px var(--alina);
+}
+.dot.alina { width: 18px; height: 18px; margin-left: -6px; background: url("icons/avatar-alina.jpg") center / cover, var(--alina); }
 .avatar.none { background: var(--bg-elev-3); }
 
 /* ---------- Page ---------- */
@@ -173,7 +180,6 @@ img { display: block; max-width: 100%; }
 .chip.sort option { background: var(--bg-elev); color: var(--label); }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 .dot.maksim { background: var(--maksim); }
-.dot.alina { background: var(--alina); }
 
 /* ---------- Grid of posters ---------- */
 .grid {
@@ -213,7 +219,6 @@ img { display: block; max-width: 100%; }
 }
 .badge.who { left: 8px; padding: 0 3px; width: 24px; justify-content: center; color: #fff; }
 .badge.who.maksim { background: color-mix(in srgb, var(--maksim) 85%, transparent); }
-.badge.who.alina { background: color-mix(in srgb, var(--alina) 85%, transparent); }
 .badge.score { right: 8px; color: var(--yellow); }
 .badge.score svg { width: 12px; height: 12px; fill: currentColor; }
 .card-title {
