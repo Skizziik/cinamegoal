@@ -10,7 +10,7 @@ export const PERSON_IDS = Object.keys(PEOPLE);
 const START = '<!-- cinemagoal:data';
 const END = '-->';
 const DATA_KEYS = ['title', 'original', 'year', 'poster', 'note', 'addedBy', 'addedAt',
-  'watched', 'watchedAt', 'ratings', 'reviews', 'votes'];
+  'watched', 'watchedAt', 'ratings', 'reviews', 'votes', 'details', 'log', 'reactions'];
 
 export class ApiError extends Error {
   constructor(status, message) {
@@ -47,11 +47,23 @@ export function emptyMovie(fields = {}) {
     reviews: { maksim: '', alina: '' },
     // "Хотим посмотреть?" — true = хочу, false = не хочу, null = ещё не решил
     votes: { maksim: null, alina: null },
+    // Wikipedia/Wikidata: { genres, runtime, directors, description, wiki, wikidata } or { missing: true }
+    details: null,
+    // activity events keyed by unique id (see feed.js); null = pruned
+    log: {},
+    // reactions[reviewOwner][reactor][emoji] = true
+    reactions: { maksim: {}, alina: {} },
   }, fields);
 }
 
+// Runtime-only fields that never go into the issue body.
+const RUNTIME_KEYS = new Set(['id', 'deleted', 'updatedAt']);
+
+// Known fields plus anything else stored on the movie, so an older version of the
+// site still open on someone's phone never drops fields added by a newer one.
 export function toData(movie) {
   const out = { v: 1 };
+  for (const [k, v] of Object.entries(movie)) if (!RUNTIME_KEYS.has(k) && v !== undefined) out[k] = v;
   for (const k of DATA_KEYS) out[k] = movie[k];
   return out;
 }
@@ -103,6 +115,10 @@ export function parseIssue(issue) {
   movie.ratings = { maksim: clampRating(movie.ratings.maksim), alina: clampRating(movie.ratings.alina) };
   const vote = (v) => (v === true || v === false ? v : null);
   movie.votes = { maksim: vote(movie.votes?.maksim), alina: vote(movie.votes?.alina) };
+  const obj = (v) => (isPlainObject(v) ? v : {});
+  movie.log = Object.fromEntries(Object.entries(obj(movie.log)).filter(([, e]) => isPlainObject(e)));
+  movie.reactions = { maksim: obj(movie.reactions?.maksim), alina: obj(movie.reactions?.alina) };
+  if (!isPlainObject(movie.details)) movie.details = null;
   movie.id = issue.number;
   movie.deleted = issue.state === 'closed';
   movie.updatedAt = issue.updated_at;

@@ -6,6 +6,12 @@ import { searchFilms } from './posters.js';
 import {
   vote, isMatch, otherPerson, voteScore, rouletteCandidates, pickRandom, buildReel, swipeQueue,
 } from './pick.js';
+import {
+  movieGenres, formatRuntime, matchesLength, LENGTHS, lookupMovie, fetchDetails, trailerUrl, wikiUrl,
+} from './meta.js';
+import {
+  REACTIONS, logPatch, buildFeed, eventText, unreadCount, reactionsOn, hasReaction, dayLabel,
+} from './feed.js';
 
 /* ---------------- helpers ---------------- */
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -65,6 +71,8 @@ const state = {
   movies: new Map(),
   tab: store.get('cg_tab', 'towatch'),
   filter: 'all',
+  genre: store.get('cg_genre', ''),
+  length: LENGTHS[store.get('cg_length', 'any')] ? store.get('cg_length', 'any') : 'any',
   query: '',
   sort: store.get('cg_sort', 'match'),
   token: getToken(),
@@ -140,6 +148,43 @@ function applyServerList(list) {
   saveCache();
   render();
   updateOpenSheet();
+  scheduleEnrich();
+}
+
+/* ---------------- Wikipedia details ---------------- */
+// Fills in genres/runtime/director/description for movies that don't have them yet,
+// one at a time. Both phones may do this at once — they'd write the same data.
+const enrichTried = new Set();
+let enrichTimer = null;
+function scheduleEnrich(delay = 1500) {
+  if (readOnly() || state.writeDenied || enrichTimer) return;
+  enrichTimer = setTimeout(async () => {
+    enrichTimer = null;
+    const m = [...state.movies.values()].find((x) => typeof x.id === 'number' && !x.deleted && !x.details && !enrichTried.has(x.id));
+    if (!m) return;
+    enrichTried.add(m.id);
+    await enrichMovie(m.id);
+    scheduleEnrich();
+  }, delay);
+}
+
+async function enrichMovie(id, { page } = {}) {
+  const m = state.movies.get(id);
+  if (!m || readOnly()) return false;
+  try {
+    // Without an explicit page, search by the current title/year (not by an older stored page).
+    const details = page ? await fetchDetails(page) : await lookupMovie({ ...m, details: null });
+    if (!details) return false;
+    const fresh = state.movies.get(id);
+    if (!fresh || fresh.deleted) return false;
+    // Patches merge field by field, so null out keys of the old details that the new ones lack
+    // (e.g. a previous `missing: true`), otherwise they would linger.
+    const stale = Object.fromEntries(Object.keys(fresh.details || {}).filter((k) => !(k in details)).map((k) => [k, null]));
+    return patchMovie(id, { details: { ...stale, ...details } }, { quiet: true });
+  } catch (e) {
+    console.warn('details lookup failed', e);
+    return false;
+  }
 }
 
 const isRateLimit = (e) => e?.status === 429 || /rate limit/i.test(e?.message || '');
@@ -206,7 +251,7 @@ function enqueue(id, fn) {
   return p;
 }
 
-async function addMovie(fields) {
+async function addMovie(fields, { page } = {}) {
   const tmpId = `tmp-${Date.now()}`;
   state.movies.set(tmpId, { ...emptyMovie(fields), id: tmpId });
   render();
@@ -217,6 +262,8 @@ async function addMovie(fields) {
     state.movies.set(created.id, created);
     saveCache();
     render();
+    enrichTried.add(created.id);
+    enrichMovie(created.id, { page });
     return created;
   } catch (e) {
     state.movies.delete(tmpId);
@@ -227,9 +274,12 @@ async function addMovie(fields) {
   }
 }
 
-async function patchMovie(id, patch) {
+// `log` adds an activity-feed event by the current person; `quiet` skips the error toast
+// (used by background work like Wikipedia lookups).
+async function patchMovie(id, patch, { log, quiet = false } = {}) {
   const local = state.movies.get(id);
   if (!local) return;
+  if (log && state.me) patch = { ...patch, ...logPatch(local, { ...log, who: state.me, t: Date.now() }) };
   state.movies.set(id, deepMerge(local, patch));
   render();
   updateOpenSheet();
@@ -245,7 +295,7 @@ async function patchMovie(id, patch) {
     return true;
   } catch (e) {
     handleError(e);
-    toast(errorText(e, 'Не сохранилось'), null, null, 8000);
+    if (!quiet) toast(errorText(e, 'Не сохранилось'), null, null, 8000);
     // A poll that started while the write was pending kept our optimistic copy,
     // so wait for it and then re-read the server state to undo the failed edit.
     if (refreshing) await refreshing;
@@ -283,9 +333,16 @@ async function restoreMovie(id) {
 }
 
 /* ---------------- list rendering ---------------- */
+// Genre + length filters; shared by the list and the roulette.
+function passesExtra(m) {
+  if (state.genre && !movieGenres(m).includes(state.genre)) return false;
+  return matchesLength(m, state.length);
+}
+
 function matches(m) {
   if (m.deleted) return false;
   if (state.filter !== 'all' && m.addedBy !== state.filter) return false;
+  if (!passesExtra(m)) return false;
   if (state.query) {
     const q = normalizeTitle(state.query);
     if (!normalizeTitle(`${m.title} ${m.original} ${m.year}`).includes(q)) return false;
@@ -315,7 +372,8 @@ function cardHTML(m) {
     const parts = PERSON_IDS.filter((p) => m.ratings[p]).map((p) => `${PEOPLE[p].short} ${m.ratings[p]}`);
     meta = parts.length ? parts.join(' · ') : 'Ещё без оценки';
   } else {
-    meta = [m.year, who?.name].filter(Boolean).join(' · ');
+    const runtime = formatRuntime(m.details?.runtime);
+    meta = [m.year, runtime || who?.name].filter(Boolean).join(' · ');
   }
   return `<button type="button" class="card" data-id="${esc(m.id)}" ${pending ? 'disabled' : ''}>
     <div class="poster${pending ? ' pending' : ''}">${posterHTML(m)}
@@ -347,6 +405,11 @@ function render() {
   $$('#tabs [data-tab]').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === state.tab)));
   $$('#filters [data-filter]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.filter === state.filter)));
   $('#sort').value = state.sort;
+  renderGenreSelect(all);
+  $('#length').value = state.length;
+  $('#genre').classList.toggle('on', !!state.genre);
+  $('#length').classList.toggle('on', state.length !== 'any');
+  renderFeedBadge(all);
   $('#meBtn').innerHTML = state.me
     ? `<span class="avatar ${state.me}">${PEOPLE[state.me].short}</span>${PEOPLE[state.me].name}`
     : '<span class="avatar none">?</span>Кто ты?';
@@ -365,12 +428,45 @@ function render() {
   const empty = $('#empty');
   empty.hidden = list.length > 0;
   if (!list.length) {
-    empty.innerHTML = state.query || state.filter !== 'all'
+    empty.innerHTML = state.query || state.filter !== 'all' || state.genre || state.length !== 'any'
       ? '<div class="big">🔍</div>Ничего не нашлось'
       : state.tab === 'watched'
         ? '<div class="big">🍿</div>Пока ничего не посмотрели.<br>Открой фильм и нажми «Посмотрели!»'
         : '<div class="big">🎬</div>Список пуст. Добавь первый фильм!';
   }
+}
+
+// Only genres that some movie on the current tab actually has, with counts.
+function renderGenreSelect(all) {
+  const counts = new Map();
+  for (const m of all) {
+    if (m.watched !== (state.tab === 'watched')) continue;
+    for (const g of movieGenres(m)) counts.set(g, (counts.get(g) || 0) + 1);
+  }
+  if (state.genre && !counts.has(state.genre)) counts.set(state.genre, 0);
+  const html = `<option value="">Все жанры</option>${[...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'ru'))
+    .map(([g, n]) => `<option value="${esc(g)}">${esc(g)} · ${n}</option>`).join('')}`;
+  const sel = $('#genre');
+  setHTML(sel, html);
+  sel.value = state.genre;
+}
+
+function feedSeenAt() {
+  const key = `cg_feed_seen_${state.me}`;
+  const v = Number(store.get(key, '0'));
+  if (v) return v;
+  // First visit: start counting from now instead of flagging the whole history as new.
+  const now = Date.now();
+  store.set(key, String(now));
+  return now;
+}
+
+function renderFeedBadge(all) {
+  const n = unreadCount(buildFeed(all), state.me, feedSeenAt());
+  const dot = $('#feedCount');
+  dot.hidden = !n;
+  dot.textContent = n > 9 ? '9+' : n;
 }
 
 function renderQuick(all) {
@@ -563,7 +659,9 @@ function openMovieForm(existing = null) {
       <div class="group-label">Кто добавил</div>
       <div class="seg-person">${PERSON_IDS.map((p) => `<button type="button" class="${p}" data-who="${p}" aria-pressed="${m.addedBy === p}"><span class="avatar ${p}">${PEOPLE[p].short}</span>${PEOPLE[p].name}</button>`).join('')}</div>
       <div class="group"><textarea class="field" name="note" rows="3" placeholder="Заметка: кто посоветовал, почему хотим посмотреть…">${esc(m.note)}</textarea></div>
-      ${existing ? '<div class="actions"><button type="button" class="btn danger" data-delete>Удалить фильм</button></div>' : ''}
+      ${existing ? `<div class="actions">
+        <button type="button" class="btn gray" data-refetch>↻ Обновить описание и жанры</button>
+        <button type="button" class="btn danger" data-delete>Удалить фильм</button></div>` : ''}
     </form>`,
   });
   const form = $('#movieForm', sheet);
@@ -636,6 +734,18 @@ function openMovieForm(existing = null) {
     $$('[data-who]', sheet).forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
   }));
   $('[data-cancel]', sheet).addEventListener('click', () => closeSheet());
+  $('[data-refetch]', sheet)?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    btn.textContent = 'Ищем в Википедии…';
+    // Look up by the current page if we have one, otherwise search by title + year.
+    const cur = state.movies.get(existing.id);
+    const ok = await enrichMovie(existing.id, { page: cur?.details?.wiki || undefined });
+    const d = state.movies.get(existing.id)?.details;
+    btn.disabled = false;
+    btn.textContent = '↻ Обновить описание и жанры';
+    toast(ok && d && !d.missing ? 'Описание и жанры обновлены' : 'В Википедии не нашлось точного совпадения');
+  });
   $('[data-delete]', sheet)?.addEventListener('click', () => {
     if (confirm(`Удалить «${existing.title}» из списка?`)) deleteMovie(existing.id).then(() => {});
     closeSheet();
@@ -658,11 +768,15 @@ function openMovieForm(existing = null) {
     haptic();
     closeSheet();
     if (existing) {
-      patchMovie(existing.id, fields);
+      const newPick = chosen && !chosen.current && chosen.page;
+      const renamed = title !== existing.title || fields.year !== (existing.year || '');
+      await patchMovie(existing.id, fields);
+      // Another movie was picked (or the title/year changed) → its Wikipedia details too.
+      if (newPick || renamed) enrichMovie(existing.id, { page: newPick ? chosen.page : undefined });
     } else {
       fields.addedAt = new Date().toISOString();
       if (state.tab !== 'towatch') { state.tab = 'towatch'; store.set('cg_tab', state.tab); }
-      await addMovie(fields);
+      await addMovie(fields, { page: chosen?.page });
     }
   });
 
@@ -703,9 +817,12 @@ function toggleVote(id, want) {
   if (!m) return;
   const next = vote(m, state.me) === want ? null : want;
   const otherWants = vote(m, otherPerson(state.me)) === true;
-  patchMovie(id, { votes: { [state.me]: next } });
-  if (next === true && otherWants) toast(`💞 Совпадение! Оба хотите «${m.title}»`);
+  const match = next === true && otherWants;
+  patchMovie(id, { votes: { [state.me]: next } }, { log: next === null ? null : voteEvent(next, match) });
+  if (match) toast(`💞 Совпадение! Оба хотите «${m.title}»`);
 }
+
+const voteEvent = (want, match) => (match ? { type: 'match' } : { type: 'vote', value: want });
 
 const addedByText = (m) => {
   const who = PEOPLE[m.addedBy];
@@ -735,7 +852,9 @@ function openRoulette() {
   const note = $('[data-note]', sheet);
   const spinBtn = $('[data-spin]', sheet);
   const tile = (m) => `<div class="reel-item" data-reel-id="${m.id}"><div class="poster">${posterHTML(m, { small: true })}</div></div>`;
-  const candidates = () => rouletteCandidates([...state.movies.values()], mode);
+  // The genre/length filters from the main screen apply here too ("комедия на 1,5 часа").
+  const candidates = () => rouletteCandidates([...state.movies.values()], mode).filter(passesExtra);
+  const filterNote = () => [state.genre, state.length !== 'any' && LENGTHS[state.length].label.toLowerCase()].filter(Boolean).join(', ');
 
   const showIdle = () => {
     const list = candidates();
@@ -746,8 +865,8 @@ function openRoulette() {
     spinBtn.disabled = !list.length;
     spinBtn.textContent = '🎲 Крутить';
     note.textContent = list.length
-      ? `Выбираем из ${list.length} ${plural(list.length, ['фильма', 'фильмов', 'фильмов'])}${mode === 'all' ? ' · без тех, что кто-то отклонил' : ''}`
-      : mode === 'match' ? 'Пока нет совпадений — проголосуйте в «Свайпах» 💘' : 'Тут пока пусто';
+      ? `Выбираем из ${list.length} ${plural(list.length, ['фильма', 'фильмов', 'фильмов'])}${filterNote() ? ` · фильтр: ${filterNote()}` : ''}${mode === 'all' ? ' · без тех, что кто-то отклонил' : ''}`
+      : filterNote() ? `Под фильтр «${filterNote()}» ничего не подходит` : mode === 'match' ? 'Пока нет совпадений — проголосуйте в «Свайпах» 💘' : 'Тут пока пусто';
   };
 
   const spin = () => {
@@ -879,7 +998,7 @@ function openSwipe() {
     const isNewMatch = want && vote(current, other) === true;
     history.push({ id: m.id, prev: vote(current, me), match: isNewMatch });
     if (isNewMatch) matches++;
-    patchMovie(m.id, { votes: { [me]: want } });
+    patchMovie(m.id, { votes: { [me]: want } }, { log: voteEvent(want, isNewMatch) });
     index++;
     if (card) {
       card.style.transition = 'transform 0.35s ease-out, opacity 0.35s';
@@ -955,6 +1074,80 @@ function openSwipe() {
   renderStack();
 }
 
+/* ---------------- details, trailer, reactions ---------------- */
+function detailMetaHTML(m) {
+  const d = m.details && !m.details.missing ? m.details : null;
+  const genres = movieGenres(m);
+  const facts = [
+    formatRuntime(d?.runtime) && `⏱ ${formatRuntime(d.runtime)}`,
+    d?.directors?.length && `🎬 ${d.directors.slice(0, 2).join(', ')}`,
+  ].filter(Boolean);
+  return `${genres.length ? `<div class="genre-chips">${genres.map((g) => `<span class="genre-chip">${esc(g)}</span>`).join('')}</div>` : ''}
+    ${facts.length ? `<div class="facts">${facts.map((f) => `<span>${esc(f)}</span>`).join('')}</div>` : ''}
+    ${d?.description ? `<div class="detail-desc"><p>${esc(d.description)}</p>${d.description.length > 160 ? '<button type="button" class="more" data-more>Ещё</button>' : ''}</div>` : ''}
+    <div class="link-row">
+      <a class="btn gray small" href="${esc(trailerUrl(m))}" target="_blank" rel="noopener" data-trailer>▶ Трейлер</a>
+      ${d?.wiki ? `<a class="btn gray small" href="${esc(wikiUrl(d.wiki))}" target="_blank" rel="noopener">Википедия</a>` : ''}
+    </div>`;
+}
+
+// Reactions others left on p's review, plus my emoji buttons when it's the other person's review.
+function reactionsHTML(m, p, ro) {
+  if (!m.reviews?.[p]) return '';
+  const got = reactionsOn(m, p);
+  const chips = got.length
+    ? `<div class="got">${got.map((r) => `<span class="got-chip" title="${esc(PEOPLE[r.who]?.name || '')}">${r.emoji}<span class="avatar ${r.who}">${PEOPLE[r.who]?.short || ''}</span></span>`).join('')}</div>`
+    : '';
+  if (ro || !state.me || p === state.me) return chips;
+  const buttons = `<div class="react-bar" aria-label="Реакция на отзыв">${REACTIONS.map((e) => `<button type="button" class="react-btn" data-react="${e}" aria-pressed="${hasReaction(m, p, state.me, e)}">${e}</button>`).join('')}</div>`;
+  return buttons + chips;
+}
+
+function toggleReaction(id, owner, emoji) {
+  const m = state.movies.get(id);
+  if (!m || !state.me || owner === state.me) return;
+  const on = !hasReaction(m, owner, state.me, emoji);
+  const patch = { reactions: { [owner]: { [state.me]: { [emoji]: on } } } };
+  if (!on) {
+    // Taking a reaction back also takes its feed event back.
+    const gone = Object.entries(m.log || {})
+      .filter(([, e]) => e?.type === 'react' && e.who === state.me && e.emoji === emoji && e.target === owner);
+    if (gone.length) patch.log = Object.fromEntries(gone.map(([k]) => [k, null]));
+  }
+  patchMovie(id, patch, { log: on ? { type: 'react', emoji, target: owner } : null });
+}
+
+/* ---------------- feed ---------------- */
+function openFeed() {
+  const events = buildFeed([...state.movies.values()]);
+  const seen = feedSeenAt();
+  let lastDay = '';
+  const rows = events.map((e) => {
+    const day = dayLabel(e.t);
+    const head = day !== lastDay ? `<div class="feed-day">${esc(day)}</div>` : '';
+    lastDay = day;
+    const time = new Date(e.t).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    const fresh = state.me && e.who !== state.me && e.t > seen;
+    return `${head}<button type="button" class="feed-row${fresh ? ' fresh' : ''}" data-open="${e.movieId}">
+      <span class="avatar ${esc(e.who)}">${PEOPLE[e.who]?.short || '?'}</span>
+      <span class="feed-text">${esc(eventText(e))}</span>
+      <span class="feed-time">${time}</span></button>`;
+  }).join('');
+  const sheet = openSheet({
+    title: 'Лента',
+    right: `<button class="close-btn" data-close aria-label="Закрыть">${ICON.close}</button>`,
+    body: rows ? `<div class="feed">${rows}</div>` : '<div class="empty"><div class="big">🕊️</div>Пока ничего не произошло</div>',
+  });
+  if (state.me) store.set(`cg_feed_seen_${state.me}`, String(Date.now()));
+  render();
+  sheet.addEventListener('click', (e) => {
+    const t = e.target.closest('button');
+    if (!t) return;
+    if (t.matches('[data-close]')) closeSheet();
+    else if (t.matches('[data-open]') && state.movies.get(Number(t.dataset.open))) openDetail(Number(t.dataset.open));
+  });
+}
+
 /* ---------------- detail ---------------- */
 function openDetail(id) {
   const m0 = state.movies.get(id);
@@ -966,6 +1159,7 @@ function openDetail(id) {
     left: ro ? '' : '<button type="button" class="text-btn" data-edit>Изменить</button>',
     right: '<button type="button" class="text-btn bold" data-done>Готово</button>',
     body: `<div class="detail-hero" data-hero></div>
+      <div class="detail-meta" data-meta></div>
       <div class="note" data-note hidden></div>
       <div class="votes" data-votes></div>
       <div class="watch-row" data-watch></div>
@@ -975,6 +1169,7 @@ function openDetail(id) {
           <div class="person-head"><span class="avatar ${p}">${PEOPLE[p].short}</span>${PEOPLE[p].name}${p === state.me ? ' <span style="color:var(--label-3);font-weight:500">(ты)</span>' : ''}<span class="score" data-score></span></div>
           ${ro ? '' : `<div class="rating" role="radiogroup" aria-label="Оценка ${PEOPLE[p].name}">${Array.from({ length: 10 }, (_, i) => `<button type="button" role="radio" data-rate="${i + 1}">${i + 1}</button>`).join('')}</div>`}
           ${ro ? '<div class="review-ro" data-review-ro></div>' : `<textarea data-review rows="3" placeholder="${p === state.me ? 'Твои впечатления…' : `Впечатления ${p === 'alina' ? 'Алины' : 'Максима'}…`}"></textarea><div class="save-state" data-save-state></div>`}
+          <div class="reactions" data-reactions></div>
         </div>`).join('')}
       </div>`,
     onClose: () => flushReviews(),
@@ -990,7 +1185,8 @@ function openDetail(id) {
     const cur = state.movies.get(id);
     if (!cur || (cur.reviews?.[p] || '') === value) { dirty[p] = false; return; }
     st.className = 'save-state'; st.textContent = 'Сохранение…';
-    const ok = await patchMovie(id, { reviews: { [p]: value } });
+    // Only your own review goes to the feed ("Максим написал отзыв").
+    const ok = await patchMovie(id, { reviews: { [p]: value } }, { log: value && p === state.me ? { type: 'review' } : null });
     if (ta.value.trim() === value) dirty[p] = false;
     st.className = `save-state ${ok ? 'ok' : 'err'}`;
     st.textContent = ok ? 'Сохранено' : 'Ошибка сохранения';
@@ -1036,7 +1232,9 @@ function openDetail(id) {
       if (ta && !dirty[p] && document.activeElement !== ta) ta.value = m.reviews?.[p] || '';
       const roEl = $('[data-review-ro]', card);
       if (roEl) roEl.textContent = m.reviews?.[p] || '';
+      setHTML($('[data-reactions]', card), reactionsHTML(m, p, ro));
     }
+    setHTML($('[data-meta]', sheet), detailMetaHTML(m));
   };
   state.sheet.update = update;
   update();
@@ -1046,15 +1244,18 @@ function openDetail(id) {
     if (!t) return;
     if (t.matches('[data-done]')) closeSheet();
     else if (t.matches('[data-edit]')) { flushReviews(); openMovieForm(state.movies.get(id)); }
-    else if (t.matches('[data-markwatched]')) { haptic(); patchMovie(id, { watched: true, watchedAt: new Date().toISOString() }); }
+    else if (t.matches('[data-markwatched]')) { haptic(); patchMovie(id, { watched: true, watchedAt: new Date().toISOString() }, { log: { type: 'watch' } }); }
     else if (t.matches('[data-unwatch]')) patchMovie(id, { watched: false, watchedAt: null });
     else if (t.matches('[data-vote]')) { haptic(); toggleVote(id, t.dataset.vote === 'yes'); }
+    else if (t.matches('[data-react]')) { haptic(); toggleReaction(id, t.closest('[data-person]').dataset.person, t.dataset.react); }
+    else if (t.matches('[data-more]')) t.closest('.detail-desc').classList.add('open');
     else if (t.matches('[data-rate]')) {
       haptic();
       const p = t.closest('[data-person]').dataset.person;
       const val = clampRating(t.dataset.rate);
       const cur = state.movies.get(id)?.ratings?.[p];
-      patchMovie(id, { ratings: { [p]: cur === val ? null : val } });
+      const next = cur === val ? null : val;
+      patchMovie(id, { ratings: { [p]: next } }, { log: next && p === state.me ? { type: 'rate', value: next } : null });
     }
   });
   $$('[data-review]', sheet).forEach((ta) => {
@@ -1090,6 +1291,17 @@ $('#filters').addEventListener('click', (e) => {
   state.filter = b.dataset.filter;
   render();
 });
+$('#genre').addEventListener('change', (e) => {
+  state.genre = e.target.value;
+  store.set('cg_genre', state.genre);
+  render();
+});
+$('#length').addEventListener('change', (e) => {
+  state.length = e.target.value;
+  store.set('cg_length', state.length);
+  render();
+});
+$('#feedBtn').addEventListener('click', () => openFeed());
 $('#sort').addEventListener('change', (e) => {
   state.sort = e.target.value;
   store.set('cg_sort', state.sort);

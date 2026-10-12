@@ -98,6 +98,18 @@ test('client: create, list, update, remove, restore', async () => {
   assert.equal(restored.deleted, false);
 });
 
+test('fields this version does not know about survive an update (forward compatibility)', async () => {
+  const { gh, client } = setup();
+  const future = { ...emptyMovie({ title: 'Из будущего' }), someFutureField: { a: 1 }, watchLinks: ['https://x'] };
+  gh.seed('Из будущего', serializeBody(future));
+  const updated = await client.update(1, { ratings: { maksim: 7 } });
+  assert.deepEqual(updated.someFutureField, { a: 1 });
+  assert.deepEqual(updated.watchLinks, ['https://x']);
+  assert.equal(updated.ratings.maksim, 7);
+  const raw = gh.issues[0].body;
+  assert.ok(!/"id":|"deleted":|"updatedAt":/.test(raw), 'runtime fields are not stored');
+});
+
 test('client: ETag polling returns changed=false when nothing changed', async () => {
   const { client } = setup();
   await client.create({ title: 'A' });
@@ -171,7 +183,7 @@ test('posters: searchFilms merges ru results with en posters', async () => {
   };
   const res = await searchFilms('Остров', { fetchImpl });
   assert.equal(res.length, 2, 'the novel is filtered out');
-  assert.deepEqual(res[0], { title: 'Остров проклятых', description: 'триллер Скорсезе 2010 года', year: '2010', poster: 'https://up/thumb/b/500px-Shutter.jpg', original: 'Shutter Island' });
+  assert.deepEqual(res[0], { page: 'Остров проклятых (фильм)', title: 'Остров проклятых', description: 'триллер Скорсезе 2010 года', year: '2010', poster: 'https://up/thumb/b/500px-Shutter.jpg', original: 'Shutter Island' });
   assert.equal(res[1].poster, 'https://up/thumb/a/500px-Legend.jpg');
   assert.equal(res[1].year, '2015');
   assert.equal(calls.length, 2);

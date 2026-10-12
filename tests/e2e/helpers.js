@@ -23,12 +23,48 @@ export function makeServer() {
   return gh;
 }
 
-const WIKI = {
-  'остров': {
-    ru: { query: { pages: { 1: { index: 1, title: 'Остров проклятых (фильм)', description: 'психологический триллер 2010 года', langlinks: [{ lang: 'en', '*': 'Shutter Island (film)' }] } } } },
-    en: { query: { pages: { 2: { title: 'Shutter Island (film)', thumbnail: { source: '/icons/icon-512.png' } } } } },
-  },
+// A tiny Wikipedia + Wikidata that knows one film, «Остров проклятых» (2010).
+const SHUTTER_PAGE = 'Остров проклятых (фильм)';
+export const SHUTTER = {
+  description: '«Остров проклятых» — психологический триллер Мартина Скорсезе.',
+  runtime: 138,
+  genres: ['психологический фильм-триллер', 'драматический фильм'],
+  directors: ['Мартин Скорсезе'],
 };
+const json = (body) => ({ status: 200, headers: CORS, contentType: 'application/json', body: JSON.stringify(body) });
+
+function wikiResponse(url) {
+  const u = new URL(url);
+  const p = u.searchParams;
+  const search = (p.get('gsrsearch') || '').toLowerCase();
+  const titles = p.get('titles') || '';
+  if (u.host === 'www.wikidata.org') {
+    if (p.get('props') === 'claims') {
+      return json({ entities: { Q210364: { claims: {
+        P136: [{ mainsnak: { datavalue: { value: { id: 'Q1' } } } }, { mainsnak: { datavalue: { value: { id: 'Q2' } } } }],
+        P57: [{ mainsnak: { datavalue: { value: { id: 'Q3' } } } }],
+        P2047: [{ mainsnak: { datavalue: { value: { amount: `+${SHUTTER.runtime}`, unit: 'http://www.wikidata.org/entity/Q7727' } } } }],
+      } } } });
+    }
+    return json({ entities: {
+      Q1: { labels: { ru: { value: SHUTTER.genres[0] } } },
+      Q2: { labels: { ru: { value: SHUTTER.genres[1] } } },
+      Q3: { labels: { ru: { value: SHUTTER.directors[0] } } },
+    } });
+  }
+  if (u.host.startsWith('en.')) {
+    return json({ query: { pages: titles.includes('Shutter') ? { 2: { title: 'Shutter Island (film)', thumbnail: { source: '/icons/icon-512.png' } } } : {} } });
+  }
+  if (search) {
+    return json({ query: { pages: search.includes('остров')
+      ? { 1: { index: 1, title: SHUTTER_PAGE, description: 'психологический триллер 2010 года', langlinks: [{ lang: 'en', '*': 'Shutter Island (film)' }] } }
+      : {} } });
+  }
+  if (titles === SHUTTER_PAGE) {
+    return json({ query: { pages: { 1: { title: SHUTTER_PAGE, extract: SHUTTER.description, pageprops: { wikibase_item: 'Q210364' } } } } });
+  }
+  return json({ query: { pages: { '-1': { title: titles, missing: '' } } } });
+}
 
 // Opens the app in a fresh browser context wired to the shared fake GitHub.
 export async function openApp(browser, gh, { me = 'maksim', token = gh.token, url = '/' } = {}) {
@@ -53,12 +89,10 @@ export async function openApp(browser, gh, { me = 'maksim', token = gh.token, ur
     const r = gh.handle({ method: req.method(), url: req.url(), headers, body: req.postData() });
     return route.fulfill({ status: r.status, headers: { ...CORS, ...r.headers }, body: r.body });
   });
-  await context.route(/wikipedia\.org/, (route) => {
-    const u = new URL(route.request().url());
-    const q = (u.searchParams.get('gsrsearch') || u.searchParams.get('titles') || '').toLowerCase();
-    const hit = Object.entries(WIKI).find(([k]) => q.includes(k) || q.includes('shutter'));
-    const body = hit ? hit[1][u.host.startsWith('ru') ? 'ru' : 'en'] : { query: { pages: {} } };
-    return route.fulfill({ status: 200, headers: CORS, contentType: 'application/json', body: JSON.stringify(body) });
+  gh.wikiCalls ??= [];
+  await context.route(/(wikipedia|wikidata)\.org/, (route) => {
+    gh.wikiCalls.push(route.request().url());
+    return route.fulfill(wikiResponse(route.request().url()));
   });
   await context.route(/fonts\.(googleapis|gstatic)\.com/, (route) => route.abort());
   const page = await context.newPage();

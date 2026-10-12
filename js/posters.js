@@ -51,6 +51,7 @@ export async function searchFilms(query, { signal, fetchImpl, limit = 8 } = {}) 
     .filter((p) => looksLikeFilm(p, q));
 
   const results = pages.map((p) => ({
+    page: p.title,
     title: cleanTitle(p.title),
     description: p.description || '',
     year: extractYear(p.title, p.description),
@@ -79,7 +80,7 @@ export async function searchFilms(query, { signal, fetchImpl, limit = 8 } = {}) 
       if (e?.name === 'AbortError') throw e;
     }
   }
-  return results.map(({ title, description, year, poster, enTitle }) => ({
-    title, description, year, poster: poster || '', original: cleanTitle(enTitle),
+  return results.map(({ page, title, description, year, poster, enTitle }) => ({
+    page, title, description, year, poster: poster || '', original: cleanTitle(enTitle),
   }));
 }

@@ -27,7 +27,13 @@
       <div class="sync" id="sync" data-state="loading" title="Синхронизация">
         <span class="sync-dot"></span><span class="sync-text">Загрузка…</span>
       </div>
-      <button class="me-btn" id="meBtn" type="button" aria-label="Сменить пользователя"></button>
+      <div class="nav-right">
+        <button class="feed-btn" id="feedBtn" type="button" aria-label="Лента событий">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a6 6 0 0 1 6 6v3.6l1.7 2.9A1 1 0 0 1 18.8 17H5.2a1 1 0 0 1-.9-1.5L6 12.6V9a6 6 0 0 1 6-6Zm0 2a4 4 0 0 0-4 4v3.9a1 1 0 0 1-.1.5L7 15h10l-.9-1.6a1 1 0 0 1-.1-.5V9a4 4 0 0 0-4-4Zm-2.5 13.5h5a2.5 2.5 0 0 1-5 0Z"/></svg>
+          <i class="feed-dot" id="feedCount" hidden></i>
+        </button>
+        <button class="me-btn" id="meBtn" type="button" aria-label="Сменить пользователя"></button>
+      </div>
     </div>
   </header>
 
@@ -52,6 +58,13 @@
         <button type="button" class="chip" data-filter="all" aria-pressed="true">Все</button>
         <button type="button" class="chip" data-filter="maksim" aria-pressed="false"><i class="dot maksim"></i>Максим</button>
         <button type="button" class="chip" data-filter="alina" aria-pressed="false"><i class="dot alina"></i>Алина</button>
+        <select class="chip sort" id="genre" aria-label="Жанр"><option value="">Все жанры</option></select>
+        <select class="chip sort" id="length" aria-label="Длительность">
+          <option value="any">Любая длина</option>
+          <option value="short">До 1,5 ч</option>
+          <option value="medium">До 2 ч</option>
+          <option value="long">Больше 2 ч</option>
+        </select>
         <select class="chip sort" id="sort" aria-label="Сортировка">
           <option value="match">Сначала совпадения</option>
           <option value="new">Сначала новые</option>
