@@ -40,6 +40,7 @@ export async function openApp(browser, gh, { me = 'maksim', token = gh.token, ur
     if (sessionStorage.getItem('cg_init')) return;
     sessionStorage.setItem('cg_init', '1');
     localStorage.setItem('cg_poll', '400');
+    localStorage.setItem('cg_spin_ms', '500');
     if (me) localStorage.setItem('cg_me', me);
     if (token) localStorage.setItem('cg_token', token);
   }, { me, token });

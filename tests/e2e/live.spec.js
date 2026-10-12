@@ -35,7 +35,16 @@ test('two devices stay in sync through GitHub', async ({ browser }, info) => {
   await expect(card(a.page)).toBeEnabled({ timeout: 20000 }); // created on GitHub
 
   await expect(card(b.page)).toBeVisible({ timeout: 30000 });
+
+  // votes: Максим wants it, Алина sees that, wants it too → both see the match
+  await card(a.page).click();
+  await a.page.getByRole('button', { name: '👍 Хочу' }).click();
+  await a.page.locator('[data-done]').click();
   await card(b.page).click();
+  await expect(b.page.locator('[data-vote-of="maksim"]')).toContainText('хочет 👍', { timeout: 30000 });
+  await b.page.getByRole('button', { name: '👍 Хочу' }).click();
+  await expect(b.page.locator('.match-banner')).toBeVisible();
+  await expect(card(a.page).locator('.badge.match')).toBeVisible({ timeout: 30000 });
   await b.page.getByRole('button', { name: 'Посмотрели!' }).click();
   await b.page.locator('[data-person="alina"]').getByRole('radio', { name: '9', exact: true }).click();
   await b.page.locator('[data-person="alina"] textarea').fill('живой тест');

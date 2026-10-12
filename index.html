@@ -53,12 +53,23 @@
         <button type="button" class="chip" data-filter="maksim" aria-pressed="false"><i class="dot maksim"></i>Максим</button>
         <button type="button" class="chip" data-filter="alina" aria-pressed="false"><i class="dot alina"></i>Алина</button>
         <select class="chip sort" id="sort" aria-label="Сортировка">
+          <option value="match">Сначала совпадения</option>
           <option value="new">Сначала новые</option>
           <option value="old">Сначала старые</option>
           <option value="rating">По оценке</option>
           <option value="az">По алфавиту</option>
         </select>
       </div>
+    </div>
+
+    <div class="quick" id="quick">
+      <button type="button" class="quick-btn roulette" id="rouletteBtn">
+        <span class="qi" aria-hidden="true">🎲</span><span class="qt"><b>Что смотрим?</b><small>Рулетка</small></span>
+      </button>
+      <button type="button" class="quick-btn swipe" id="swipeBtn">
+        <span class="qi" aria-hidden="true">💘</span><span class="qt"><b>Свайпы</b><small id="swipeHint">Хочу / не хочу</small></span>
+        <i class="pill" id="swipeCount" hidden></i>
+      </button>
     </div>
 
     <div class="grid" id="grid" aria-live="polite"></div>

@@ -3,6 +3,9 @@ import {
   PEOPLE, PERSON_IDS, createClient, emptyMovie, deepMerge, averageRating, normalizeTitle, clampRating,
 } from './store.js';
 import { searchFilms } from './posters.js';
+import {
+  vote, isMatch, otherPerson, voteScore, rouletteCandidates, pickRandom, buildReel, swipeQueue,
+} from './pick.js';
 
 /* ---------------- helpers ---------------- */
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -63,7 +66,7 @@ const state = {
   tab: store.get('cg_tab', 'towatch'),
   filter: 'all',
   query: '',
-  sort: store.get('cg_sort', 'new'),
+  sort: store.get('cg_sort', 'match'),
   token: getToken(),
   loaded: false,
   pending: new Map(),
@@ -102,21 +105,27 @@ function setSync(kind, text) {
 }
 
 let refreshing = null;
+let refreshingClient = null;
 async function refresh({ force = false } = {}) {
-  if (refreshing) return refreshing;
-  refreshing = (async () => {
+  if (refreshing && refreshingClient === client) return refreshing;
+  // A response from a client made with an old key must not affect the new one
+  // (e.g. a late 401 for a wrong key wiping the correct key typed right after).
+  const c = client;
+  refreshingClient = c;
+  const p = (async () => {
     try {
-      const r = await client.list({ force });
+      const r = await c.list({ force });
+      if (c !== client) return;
       if (r.changed) applyServerList(r.movies);
-      state.error = null;
       setSync('ok');
     } catch (e) {
-      handleError(e);
+      if (c === client) handleError(e);
     } finally {
-      refreshing = null;
+      if (refreshing === p) refreshing = null;
     }
   })();
-  return refreshing;
+  refreshing = p;
+  return p;
 }
 
 function applyServerList(list) {
@@ -237,6 +246,9 @@ async function patchMovie(id, patch) {
   } catch (e) {
     handleError(e);
     toast(errorText(e, 'Не сохранилось'), null, null, 8000);
+    // A poll that started while the write was pending kept our optimistic copy,
+    // so wait for it and then re-read the server state to undo the failed edit.
+    if (refreshing) await refreshing;
     await refresh({ force: true });
     return false;
   }
@@ -289,6 +301,7 @@ function sortMovies(arr) {
     if (by === 'az') return cmpTitle(a, b);
     if (by === 'rating') return (averageRating(b) ?? -1) - (averageRating(a) ?? -1) || cmpTitle(a, b);
     if (by === 'old') return date(a) - date(b);
+    if (by === 'match' && state.tab === 'towatch') return voteScore(b) - voteScore(a) || date(b) - date(a);
     return date(b) - date(a);
   });
 }
@@ -308,6 +321,7 @@ function cardHTML(m) {
     <div class="poster${pending ? ' pending' : ''}">${posterHTML(m)}
       ${who ? `<span class="badge who ${m.addedBy}" title="Добавил(а) ${esc(who.name)}">${who.short}</span>` : ''}
       ${m.watched && avg !== null ? `<span class="badge score">${ICON.star}${avg}</span>` : ''}
+      ${!m.watched && isMatch(m) ? '<span class="badge match" title="Оба хотите посмотреть">💞</span>' : ''}
     </div>
     <div class="card-title">${esc(m.title)}</div>
     <div class="card-meta">${esc(meta)}</div>
@@ -338,6 +352,7 @@ function render() {
     : '<span class="avatar none">?</span>Кто ты?';
 
   renderBanner();
+  renderQuick(all);
 
   const grid = $('#grid');
   const list = sortMovies(state.tab === 'watched' ? watched : towatch);
@@ -358,14 +373,29 @@ function render() {
   }
 }
 
+function renderQuick(all) {
+  $('#quick').hidden = state.tab !== 'towatch' || !state.loaded || !all.some((m) => !m.watched);
+  $('#swipeBtn').hidden = readOnly();
+  const left = state.me ? swipeQueue(all, state.me).length : 0;
+  const pill = $('#swipeCount');
+  pill.hidden = !left;
+  pill.textContent = left;
+  $('#swipeHint').textContent = state.me && !left ? 'Всё проголосовано ✓' : 'Хочу / не хочу';
+}
+
 function renderBanner() {
   const b = $('#banner');
   if (!readOnly()) { b.hidden = true; b.dataset.mode = ''; return; }
   const mode = state.error === 'badkey' ? 'badkey' : 'ro';
-  if (b.dataset.mode === mode && !b.hidden) return;
-  b.dataset.mode = mode;
   b.hidden = false;
-  b.innerHTML = `${mode === 'badkey' ? '<strong>Ключ доступа не подошёл.</strong> ' : '<strong>Режим просмотра.</strong> '}
+  if (b.dataset.mode) {
+    // Only swap the message: rebuilding the form would wipe a key being typed.
+    if (b.dataset.mode !== mode) $('#bannerMsg').textContent = mode === 'badkey' ? 'Ключ доступа не подошёл.' : 'Режим просмотра.';
+    b.dataset.mode = mode;
+    return;
+  }
+  b.dataset.mode = mode;
+  b.innerHTML = `<strong id="bannerMsg">${mode === 'badkey' ? 'Ключ доступа не подошёл.' : 'Режим просмотра.'}</strong>
     Чтобы добавлять и оценивать фильмы, открой ссылку-приглашение или вставь ключ:
     <form class="row" id="keyForm"><input class="input" id="keyInput" type="password" placeholder="github_pat_…" autocomplete="off" autocapitalize="off" spellcheck="false">
     <button class="btn small" type="submit">Войти</button></form>`;
@@ -642,6 +672,289 @@ function openMovieForm(existing = null) {
   if (!existing) setTimeout(() => titleIn.focus(), 350);
 }
 
+/* ---------------- votes ---------------- */
+function voteStatus(p, v) {
+  if (v === true) return 'хочет 👍';
+  if (v === false) return 'не хочет 👎';
+  return p === 'alina' ? 'ещё не решила' : 'ещё не решил';
+}
+
+function votesHTML(m, ro) {
+  const me = state.me;
+  const rows = [];
+  if (isMatch(m)) rows.push('<div class="match-banner">💞 Совпадение! Оба хотите посмотреть</div>');
+  if (me && !ro) {
+    const v = vote(m, me);
+    rows.push(`<div class="vote-q">Хочешь посмотреть?</div>
+      <div class="vote-btns">
+        <button type="button" class="vote-btn yes" data-vote="yes" aria-pressed="${v === true}">👍 Хочу</button>
+        <button type="button" class="vote-btn no" data-vote="no" aria-pressed="${v === false}">👎 Не хочу</button>
+      </div>`);
+  }
+  const others = me && !ro ? [otherPerson(me)] : PERSON_IDS;
+  rows.push(others.map((p) => `<div class="vote-other" data-vote-of="${p}"><span class="avatar ${p}">${PEOPLE[p].short}</span><span>${PEOPLE[p].name} ${voteStatus(p, vote(m, p))}</span></div>`).join(''));
+  return rows.join('');
+}
+
+// Sets (or clears, when tapped again) my vote and celebrates a fresh match.
+function toggleVote(id, want) {
+  if (!state.me) { openMeSheet(); return; }
+  const m = state.movies.get(id);
+  if (!m) return;
+  const next = vote(m, state.me) === want ? null : want;
+  const otherWants = vote(m, otherPerson(state.me)) === true;
+  patchMovie(id, { votes: { [state.me]: next } });
+  if (next === true && otherWants) toast(`💞 Совпадение! Оба хотите «${m.title}»`);
+}
+
+const addedByText = (m) => {
+  const who = PEOPLE[m.addedBy];
+  return who ? `добавил${m.addedBy === 'alina' ? 'а' : ''} ${who.name}` : '';
+};
+
+/* ---------------- roulette ---------------- */
+const ROULETTE_LABELS = { all: 'Все', match: '💞 Совпадения', maksim: 'От Максима', alina: 'От Алины' };
+
+function openRoulette() {
+  let mode = store.get('cg_roulette', 'all');
+  if (!ROULETTE_LABELS[mode]) mode = 'all';
+  let spinning = false;
+  const sheet = openSheet({
+    title: 'Что смотрим?',
+    className: 'roulette-sheet',
+    right: `<button class="close-btn" data-close aria-label="Закрыть">${ICON.close}</button>`,
+    body: `<div class="chips roulette-modes">${Object.entries(ROULETTE_LABELS).map(([k, v]) => `<button type="button" class="chip" data-mode="${k}" aria-pressed="${k === mode}">${v}</button>`).join('')}</div>
+      <div class="reel-wrap" data-wrap><div class="reel" data-reel></div><div class="reel-marker" aria-hidden="true"></div></div>
+      <div class="roulette-result" data-result aria-live="polite"></div>
+      <div class="actions"><button type="button" class="btn" data-spin>🎲 Крутить</button></div>
+      <p class="roulette-note" data-note></p>`,
+  });
+  const reel = $('[data-reel]', sheet);
+  const wrap = $('[data-wrap]', sheet);
+  const result = $('[data-result]', sheet);
+  const note = $('[data-note]', sheet);
+  const spinBtn = $('[data-spin]', sheet);
+  const tile = (m) => `<div class="reel-item" data-reel-id="${m.id}"><div class="poster">${posterHTML(m, { small: true })}</div></div>`;
+  const candidates = () => rouletteCandidates([...state.movies.values()], mode);
+
+  const showIdle = () => {
+    const list = candidates();
+    reel.style.transition = 'none';
+    reel.style.transform = 'translateX(0)';
+    reel.innerHTML = list.slice(0, 12).map(tile).join('');
+    result.innerHTML = '';
+    spinBtn.disabled = !list.length;
+    spinBtn.textContent = '🎲 Крутить';
+    note.textContent = list.length
+      ? `Выбираем из ${list.length} ${plural(list.length, ['фильма', 'фильмов', 'фильмов'])}${mode === 'all' ? ' · без тех, что кто-то отклонил' : ''}`
+      : mode === 'match' ? 'Пока нет совпадений — проголосуйте в «Свайпах» 💘' : 'Тут пока пусто';
+  };
+
+  const spin = () => {
+    const list = candidates();
+    if (spinning || !list.length) return;
+    spinning = true;
+    haptic();
+    const winner = pickRandom(list);
+    const { items, index } = buildReel(list, winner);
+    result.innerHTML = '';
+    spinBtn.disabled = true;
+    reel.style.transition = 'none';
+    reel.style.transform = 'translateX(0)';
+    reel.innerHTML = items.map(tile).join('');
+    const item = reel.children[index];
+    const offset = item.offsetLeft + item.offsetWidth / 2 - wrap.clientWidth / 2;
+    void reel.offsetWidth; // commit the reset so the spin always starts from the left
+    const ms = Number(store.get('cg_spin_ms', '')) || 3600;
+    reel.style.transition = `transform ${ms}ms cubic-bezier(0.12, 0.8, 0.14, 1)`;
+    reel.style.transform = `translateX(${-offset}px)`;
+    let done = false;
+    const finish = () => {
+      if (done || state.sheet?.el !== sheet) return;
+      done = true;
+      spinning = false;
+      item.classList.add('win');
+      haptic();
+      result.innerHTML = `<div class="win-title">${esc(winner.title)}</div>
+        <div class="win-meta">${esc([winner.year, addedByText(winner)].filter(Boolean).join(' · '))}${isMatch(winner) ? ' · 💞' : ''}</div>
+        <button type="button" class="btn success" data-open="${winner.id}">🍿 Смотрим!</button>`;
+      spinBtn.disabled = false;
+      spinBtn.textContent = '🎲 Ещё раз';
+    };
+    reel.addEventListener('transitionend', finish, { once: true });
+    setTimeout(finish, ms + 300);
+  };
+
+  sheet.addEventListener('click', (e) => {
+    const t = e.target.closest('button');
+    if (!t) return;
+    if (t.matches('[data-close]')) closeSheet();
+    else if (t.matches('[data-spin]')) spin();
+    else if (t.matches('[data-open]')) openDetail(Number(t.dataset.open));
+    else if (t.matches('[data-mode]') && !spinning) {
+      mode = t.dataset.mode;
+      store.set('cg_roulette', mode);
+      $$('[data-mode]', sheet).forEach((b) => b.setAttribute('aria-pressed', String(b === t)));
+      showIdle();
+    }
+  });
+  showIdle();
+}
+
+/* ---------------- swipes ---------------- */
+function openSwipe() {
+  if (readOnly()) return;
+  if (!state.me) { openMeSheet(); return; }
+  const me = state.me;
+  const other = otherPerson(me);
+  const queue = swipeQueue([...state.movies.values()], me);
+  const history = [];
+  let index = 0;
+  let matches = 0;
+  const sheet = openSheet({
+    title: 'Свайпы',
+    className: 'swipe-sheet',
+    right: `<button class="close-btn" data-close aria-label="Закрыть">${ICON.close}</button>`,
+    body: `<div class="swipe-progress" data-progress></div>
+      <div class="swipe-stack" data-stack></div>
+      <div class="swipe-actions">
+        <button type="button" class="swipe-btn undo" data-undo aria-label="Вернуть предыдущий">↺</button>
+        <button type="button" class="swipe-btn no" data-no aria-label="Не хочу">✕</button>
+        <button type="button" class="swipe-btn yes" data-yes aria-label="Хочу">♥</button>
+      </div>
+      <p class="swipe-hint">Вправо — хочу, влево — не хочу</p>
+      <div class="match-overlay" data-match hidden></div>`,
+  });
+  const stack = $('[data-stack]', sheet);
+  const overlay = $('[data-match]', sheet);
+
+  const swipeCard = (queued, pos) => {
+    const m = state.movies.get(queued.id) || queued; // freshest copy: the other person may have voted meanwhile
+    return `<div class="swipe-card ${pos}" data-swipe-id="${m.id}">
+      <div class="poster">${posterHTML(m)}</div>
+      <div class="stamp yes">ХОЧУ</div><div class="stamp no">НЕТ</div>
+      <div class="swipe-info">
+        <div class="swipe-title">${esc(m.title)}</div>
+        <div class="swipe-meta">${esc([m.year, addedByText(m)].filter(Boolean).join(' · '))}</div>
+        ${vote(m, other) === true ? `<div class="swipe-tag">${PEOPLE[other].name} хочет 👍</div>` : ''}
+        ${m.note ? `<div class="swipe-note">${esc(m.note)}</div>` : ''}
+      </div>
+    </div>`;
+  };
+
+  const renderStack = () => {
+    const left = queue.length - index;
+    $('[data-progress]', sheet).textContent = left ? `${index + 1} из ${queue.length}` : '';
+    $('[data-undo]', sheet).disabled = !history.length;
+    $('[data-no]', sheet).disabled = !left;
+    $('[data-yes]', sheet).disabled = !left;
+    if (!left) {
+      stack.innerHTML = `<div class="swipe-done"><div class="big">🎉</div>
+        <b>${queue.length ? 'Готово — ты проголосовал(а) за все фильмы' : 'Новых фильмов для голосования нет'}</b>
+        <span>${matches ? `Новых совпадений: ${matches} 💞` : 'Совпадения появятся, когда второй тоже проголосует'}</span></div>`;
+      return;
+    }
+    stack.innerHTML = [queue[index + 1] && swipeCard(queue[index + 1], 'next'), swipeCard(queue[index], 'top')].filter(Boolean).join('');
+    attachDrag($('.swipe-card.top', stack));
+  };
+
+  const showMatch = (m) => {
+    overlay.hidden = false;
+    overlay.innerHTML = `<div class="match-card">
+      <div class="match-title">Это мэтч! 💞</div>
+      <div class="match-avatars"><span class="avatar maksim">М</span><span class="avatar alina">А</span></div>
+      <div class="poster">${posterHTML(m, { small: true })}</div>
+      <div class="match-sub">Вы оба хотите посмотреть «${esc(m.title)}»</div>
+      <div class="actions"><button type="button" class="btn" data-continue>Продолжить</button>
+        <button type="button" class="btn gray" data-open="${m.id}">Открыть фильм</button></div>
+    </div>`;
+  };
+
+  const decide = (want) => {
+    const m = queue[index];
+    if (!m || !overlay.hidden) return;
+    const card = $('.swipe-card.top', stack);
+    haptic();
+    const current = state.movies.get(m.id) || m;
+    const isNewMatch = want && vote(current, other) === true;
+    history.push({ id: m.id, prev: vote(current, me), match: isNewMatch });
+    if (isNewMatch) matches++;
+    patchMovie(m.id, { votes: { [me]: want } });
+    index++;
+    if (card) {
+      card.style.transition = 'transform 0.35s ease-out, opacity 0.35s';
+      card.style.transform = `translateX(${want ? 140 : -140}%) rotate(${want ? 18 : -18}deg)`;
+      card.style.opacity = '0';
+    }
+    setTimeout(() => {
+      if (state.sheet?.el !== sheet) return;
+      renderStack();
+      if (isNewMatch) showMatch(state.movies.get(m.id) || m);
+    }, card ? 260 : 0);
+  };
+
+  function attachDrag(card) {
+    if (!card) return;
+    let x0 = null; let dx = 0; let t0 = 0;
+    const move = (e) => {
+      if (x0 === null) return;
+      dx = e.clientX - x0;
+      card.style.transform = `translateX(${dx}px) rotate(${dx / 18}deg)`;
+      card.style.setProperty('--yes', Math.max(0, Math.min(1, dx / 100)));
+      card.style.setProperty('--no', Math.max(0, Math.min(1, -dx / 100)));
+    };
+    const up = () => {
+      if (x0 === null) return;
+      x0 = null;
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      const speed = Math.abs(dx) / Math.max(1, Date.now() - t0);
+      if (Math.abs(dx) > 100 || (Math.abs(dx) > 40 && speed > 0.5)) decide(dx > 0);
+      else {
+        card.style.transition = 'transform 0.25s cubic-bezier(0.32, 0.72, 0, 1)';
+        card.style.transform = '';
+        card.style.setProperty('--yes', 0);
+        card.style.setProperty('--no', 0);
+      }
+    };
+    card.addEventListener('pointerdown', (e) => {
+      x0 = e.clientX; dx = 0; t0 = Date.now();
+      card.style.transition = 'none';
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+      window.addEventListener('pointercancel', up);
+    });
+  }
+
+  const onKey = (e) => {
+    if (state.sheet?.el !== sheet) return;
+    if (e.key === 'ArrowRight') decide(true);
+    if (e.key === 'ArrowLeft') decide(false);
+  };
+  document.addEventListener('keydown', onKey);
+  state.sheet.onClose = () => document.removeEventListener('keydown', onKey);
+
+  sheet.addEventListener('click', (e) => {
+    const t = e.target.closest('button');
+    if (!t) return;
+    if (t.matches('[data-close]')) closeSheet();
+    else if (t.matches('[data-yes]')) decide(true);
+    else if (t.matches('[data-no]')) decide(false);
+    else if (t.matches('[data-continue]')) overlay.hidden = true;
+    else if (t.matches('[data-open]')) openDetail(Number(t.dataset.open));
+    else if (t.matches('[data-undo]')) {
+      const last = history.pop();
+      if (!last) return;
+      index--;
+      if (last.match) matches--;
+      patchMovie(last.id, { votes: { [me]: last.prev } });
+      renderStack();
+    }
+  });
+  renderStack();
+}
+
 /* ---------------- detail ---------------- */
 function openDetail(id) {
   const m0 = state.movies.get(id);
@@ -654,6 +967,7 @@ function openDetail(id) {
     right: '<button type="button" class="text-btn bold" data-done>Готово</button>',
     body: `<div class="detail-hero" data-hero></div>
       <div class="note" data-note hidden></div>
+      <div class="votes" data-votes></div>
       <div class="watch-row" data-watch></div>
       <div data-ratings hidden>
         <div class="avg" data-avg></div>
@@ -703,6 +1017,7 @@ function openDetail(id) {
       : m.watched
         ? `<button type="button" class="btn gray" data-unwatch>${ICON.eye}Вернуть в «Хотим посмотреть»</button><div class="when">Посмотрели ${fmtDate(m.watchedAt, true)}</div>`
         : `<button type="button" class="btn success" data-markwatched>${ICON.check}Посмотрели!</button>`);
+    setHTML($('[data-votes]', sheet), m.watched ? '' : votesHTML(m, ro));
     $('[data-ratings]', sheet).hidden = !m.watched;
     const avg = averageRating(m);
     setHTML($('[data-avg]', sheet), avg !== null ? `<b>${avg}</b><span>общая оценка</span>` : '<span>Поставьте оценки от 1 до 10</span>');
@@ -733,6 +1048,7 @@ function openDetail(id) {
     else if (t.matches('[data-edit]')) { flushReviews(); openMovieForm(state.movies.get(id)); }
     else if (t.matches('[data-markwatched]')) { haptic(); patchMovie(id, { watched: true, watchedAt: new Date().toISOString() }); }
     else if (t.matches('[data-unwatch]')) patchMovie(id, { watched: false, watchedAt: null });
+    else if (t.matches('[data-vote]')) { haptic(); toggleVote(id, t.dataset.vote === 'yes'); }
     else if (t.matches('[data-rate]')) {
       haptic();
       const p = t.closest('[data-person]').dataset.person;
@@ -784,6 +1100,8 @@ $('#search').addEventListener('input', (e) => {
   render();
 });
 $('#addBtn').addEventListener('click', () => openMovieForm());
+$('#rouletteBtn').addEventListener('click', () => openRoulette());
+$('#swipeBtn').addEventListener('click', () => openSwipe());
 $('#meBtn').addEventListener('click', () => openMeSheet());
 const nav = $('#nav');
 const onScroll = () => nav.classList.toggle('scrolled', window.scrollY > 36);

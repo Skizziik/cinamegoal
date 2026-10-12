@@ -10,7 +10,7 @@ export const PERSON_IDS = Object.keys(PEOPLE);
 const START = '<!-- cinemagoal:data';
 const END = '-->';
 const DATA_KEYS = ['title', 'original', 'year', 'poster', 'note', 'addedBy', 'addedAt',
-  'watched', 'watchedAt', 'ratings', 'reviews'];
+  'watched', 'watchedAt', 'ratings', 'reviews', 'votes'];
 
 export class ApiError extends Error {
   constructor(status, message) {
@@ -45,6 +45,8 @@ export function emptyMovie(fields = {}) {
     watchedAt: null,
     ratings: { maksim: null, alina: null },
     reviews: { maksim: '', alina: '' },
+    // "Хотим посмотреть?" — true = хочу, false = не хочу, null = ещё не решил
+    votes: { maksim: null, alina: null },
   }, fields);
 }
 
@@ -99,6 +101,8 @@ export function parseIssue(issue) {
   const movie = emptyMovie({ title: issue.title, addedAt: issue.created_at, ...data });
   if (!movie.title) movie.title = issue.title;
   movie.ratings = { maksim: clampRating(movie.ratings.maksim), alina: clampRating(movie.ratings.alina) };
+  const vote = (v) => (v === true || v === false ? v : null);
+  movie.votes = { maksim: vote(movie.votes?.maksim), alina: vote(movie.votes?.alina) };
   movie.id = issue.number;
   movie.deleted = issue.state === 'closed';
   movie.updatedAt = issue.updated_at;
